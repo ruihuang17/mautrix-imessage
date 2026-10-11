@@ -468,9 +468,12 @@ func (portal *Portal) GetBasePowerLevels() *event.PowerLevelsEventContent {
 		StateDefaultPtr: &nope,
 		BanPtr:          &nope,
 		InvitePtr:       &invite,
-		Users: map[id.UserID]int{
-			portal.MainIntent().UserID: 100,
-		},
+		// NOTE: The room creator (portal.MainIntent().UserID for DM portals) is
+		// intentionally NOT pre-seeded here. Modern Synapse rejects createRoom when
+		// the creator appears in initial power_levels content.users
+		// ("Creator user ... must not appear in content.users") and assigns the
+		// creator PL 100 automatically anyway.
+		Users: map[id.UserID]int{},
 		Events: map[string]int{
 			event.StateRoomName.Type:   anyone,
 			event.StateRoomAvatar.Type: anyone,
@@ -1723,12 +1726,20 @@ func (portal *Portal) Delete() {
 }
 
 func (portal *Portal) GetMatrixUsers() ([]id.UserID, error) {
-	members, err := portal.MainIntent().JoinedMembers(portal.MXID)
+	members, err := portal.MainIntent().Members(portal.MXID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get member list: %w", err)
 	}
 	var users []id.UserID
-	for userID := range members.Joined {
+	for _, evt := range members.Chunk {
+		membership := evt.Content.AsMember().Membership
+		// Count both joined AND invited real users. Otherwise a freshly created
+		// portal where the owner has only been invited (not yet accepted) is
+		// treated as empty and torn down before they can join.
+		if membership != event.MembershipJoin && membership != event.MembershipInvite {
+			continue
+		}
+		userID := id.UserID(evt.GetStateKey())
 		_, isPuppet := portal.bridge.ParsePuppetMXID(userID)
 		if !isPuppet && userID != portal.bridge.Bot.UserID {
 			users = append(users, userID)
